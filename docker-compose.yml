@@ -1,0 +1,21 @@
+version: "3.5"
+
+services:
+
+  backend:
+    build: ./service/.
+    container_name: warehouse
+    links:  # figure out what this is!!
+    - redis
+    ports:
+      - 3000:3000
+    environment:
+      - PORT=3000
+      - REDIS_URL=redis://cache
+  
+  redis:
+    image: redis
+    container_name: cache
+    expose:
+      - 6379
+      

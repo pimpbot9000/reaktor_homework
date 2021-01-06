@@ -1,66 +1,77 @@
 const warehouseRouter = require('express').Router()
+const redisClient = require('../redis/redis-client');
 const axios = require('axios')
 const config = require('../utils/config')
 const xmlParser = require('xml2js').parseString
 
 warehouseRouter.get('/products', (request, response) => {
-  return response.status(200).send("Vaihtoehtoina ovat: /gloves, /facemasks ja /beanies").end()
+  return response.status(200).send("Vaihtoehtoina ovat: :gloves, :facemasks ja :beanies").end()
 })
 
 warehouseRouter.get('/products/:category', async (request, response) => {
 
-  //const id = request.params.id
-  console.log(request.params)
-  //const stopId = config.STOPS[id]
+  const category = request.params.category  
 
-  //if (!stopId) return response.status(404).send("404: pysäkkiä ei löydy! vain munccalaisille. köyhä.").end()
-  const category = request.params.category
-  console.log("CATEGORY", category)
+  let cacheResult = await redisClient.getAsync(category)  
 
-  const productUrl = config.API_URL + "/v2/products/" + category
-  console.log(productUrl)
+  if (cacheResult) {
 
-  products = null
-
-  try {
-    let result = await axios({
-      url: productUrl,
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'no-cache'
-      }
-    })
-
-    products = result.data
-
-  } catch (e) {
-    console.log("error", e)
-    response
-      .status(500)
-      .send('Server error no products found').end()
-  }
-
-  manufacturers = getManufacturers(products)
-  manufacturerRequests = createRequests(manufacturers)
-
-  try {
-
-    let results = await axios.all(manufacturerRequests)
-
-    dataArrays = results.map(item => item.data.response)
-
-    resultti = createResult(buildMapOfAvailability(joinArrays(dataArrays)), products)
-
-    response
+    console.log("found from cache")
+    return response
       .status(200)
-      .json(resultti)
+      .json(JSON.parse(cacheResult))
 
-  } catch (e) {
-    console.log("error", e)
-    response
-      .status(500)
-      .send('Server error: Availabilities not found').end()
+  } else {
+
+    console.log("not found from cache")
+    const productUrl = config.API_URL + "/v2/products/" + category
+
+    products = null
+
+    try {
+      let result = await axios({
+        url: productUrl,
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache'
+        }
+      })
+
+      products = result.data
+
+    } catch (e) {      
+      response
+        .status(500)
+        .send('Server error no products found').end()
+    }
+
+    manufacturers = getManufacturers(products)
+    manufacturerRequests = createRequests(manufacturers)
+
+
+    try {
+
+      let results = await axios.all(manufacturerRequests)
+
+      dataArrays = results.map(item => item.data.response)
+
+      result = createResult(buildMapOfAvailability(joinArrays(dataArrays)), products)
+
+      console.log("Save to cache")
+      await redisClient.setAsync(category, JSON.stringify(result), 'EX', config.EXPIRATION)
+
+      response
+        .status(200)
+        .json(result)
+
+    } catch (e) {
+      
+      response
+        .status(500)
+        .send('Server error: Availabilities not found').end()
+    }
+
   }
 })
 
@@ -83,7 +94,7 @@ createAxiosRequest = (url) => {
     method: 'GET',
     headers: {
       'Content-Type': 'application/json',
-      'Cache-Control': 'max-age=100'
+      //'Cache-Control': 'max-age=100'
     }
   })
 }
@@ -115,7 +126,7 @@ const buildMapOfAvailability = (array) => {
       key = item.id.toLowerCase()
       map.set(key, parseAvailability(item.DATAPAYLOAD))
     } catch (e) {
-      console.log(e)
+
     }
   })
 
