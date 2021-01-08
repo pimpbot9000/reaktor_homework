@@ -5,8 +5,10 @@ const config = require('../utils/config')
 const xmlParser = require('xml2js').parseString
 require('../utils/helpers')
 
+const helpString = "Your options are: /gloves, /facemasks and /beanies"
+
 warehouseRouter.get('/products', (request, response) => {
-  return response.status(402).send("Your options are: /gloves, /facemasks and /beanies").end()
+  return response.status(402).send(helpString).end()
 })
 
 warehouseRouter.get('/products/:category', async (request, response) => {
@@ -14,14 +16,14 @@ warehouseRouter.get('/products/:category', async (request, response) => {
   const category = request.params.category
   let invalidateCache = false
 
-  if (request.query.invalidate_cache) {
+  if (request.query.invalidate_cache === "true") {
     invalidateCache = true
   }
 
   if (!config.CATEGORIES.includes(category)) {
     return response
       .status(402)
-      .send('No content').end()
+      .send(helpString).end()
   }
 
   if (!invalidateCache) {
@@ -35,36 +37,32 @@ warehouseRouter.get('/products/:category', async (request, response) => {
     }
 
   }
-  
-  products = null
 
-  try {
+  result = await fetchProducts(category)
 
-    const productUrl = config.API_BASE_URL + config.PRODUCTS_PATH + category
-    let result = await createAxiosRequest(productUrl)
-    products = result.data
+  if (result.products === null) {
 
-  } catch (e) {
-
-    console.log(e)
     return response
       .status(500)
-      .send('Server error no products found').end()
+      .send(result.message).end()
+
   }
 
-  // get all manufacturers from the list of products
+  products = result.products
+
+  // get all manufacturers from the list of products and combine data
+
   manufacturers = getManufacturers(products)
   manufacturerRequests = createRequests(manufacturers)
 
   try {
 
     let results = await axios.all(manufacturerRequests)
-
     dataArrays = results.map(item => item.data.response)
 
-    result = createResult(buildMapOfAvailability(concatArrays(dataArrays)), products)
-    
-    await redisClient.setAsync(category, JSON.stringify(result), 'EX', config.EXPIRATION)
+    createResult(buildMapOfAvailability(concatArrays(dataArrays)), products)
+
+    await redisClient.setAsync(category, JSON.stringify(products), 'EX', config.EXPIRATION)
 
     response
       .status(200)
@@ -72,33 +70,32 @@ warehouseRouter.get('/products/:category', async (request, response) => {
 
   } catch (e) {
 
-    console.log(e)
     response
       .status(500)
       .send('Product inventories not found').end()
 
   }
 
-
 })
 
-const fectchProducts = () => {  
+
+const fetchProducts = async (category) => {
 
   try {
 
     const productUrl = config.API_BASE_URL + config.PRODUCTS_PATH + category
     let result = await createAxiosRequest(productUrl)
     products = result.data
-    return {'status': 'ok', 'result': products}
+
+    return { 'message': 'ok', 'products': products }
 
   } catch (e) {
 
-    return {'status': 'Server error', 'result': null}
+    return { 'message': 'Server error', 'products': null }
 
   }
+
 }
-
-
 
 const getManufacturers = (products) => {
   manufactures = new Set()
@@ -106,21 +103,20 @@ const getManufacturers = (products) => {
   return manufactures
 }
 
-const createRequests = (manufacturers) => {
+const createRequests = (manufacturers) => {  
   axiosRequests = [...manufacturers].map(manufacturer => createAxiosRequest(config.API_BASE_URL + config.AVAILABILITY_PATH + manufacturer))
   return axiosRequests
 }
 
-createAxiosRequest = (url) => {
-
-  return axios({
+createAxiosRequest = (url) => axios(
+  {
     url: url,
     method: 'GET',
     headers: {
       'Content-Type': 'application/json',
     }
   })
-}
+
 
 const concatArrays = (arrays) => {
 
@@ -129,9 +125,11 @@ const concatArrays = (arrays) => {
 
 }
 
-const createResult = (mapOfAvailability, products) => {
-  products.forEach(product => product.availability = mapOfAvailability.getOrElse(product.id, "NO_INFO"))
-  return products
+/**
+ * Updates the array of products in place
+ */
+const createResult = (mapOfAvailability, products) => {  
+  products.forEach(product => product.availability = mapOfAvailability.getOrElse(product.id, "NO_INFO"))  
 }
 
 /**

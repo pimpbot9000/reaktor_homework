@@ -19,7 +19,8 @@ services:
     expose:
       - 6379
 
-  dummypython:
-    build: ./dummy/.
+  the_invalidator: # I'm here to invalidate caches... and to chew bubble gum. And I'm all out of bubble gum.  
+    build: ./invalidator/.
+    container_name: the_invalidator
     environment:
       - API_URL=http://warehouse:3000/warehouse/products
