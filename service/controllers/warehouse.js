@@ -3,11 +3,11 @@ const redisClient = require('../redis/redis-client');
 const axios = require('axios')
 const config = require('../utils/config')
 const xmlParser = require('xml2js').parseString
-require('../utils/helpers')
+const {zip, flattenArrays} = require('../utils/helpers')
 
 const helpString = "Your options are: /gloves, /facemasks and /beanies"
 
-warehouseRouter.get('/products', (request, response) => {
+warehouseRouter.get('/products', (_, response) => {
   return response.status(402).send(helpString).end()
 })
 
@@ -28,7 +28,7 @@ warehouseRouter.get('/products/:category', async (request, response) => {
 
   if (!invalidateCache) {
 
-    let cacheResult = await redisClient.getAsync(category)
+    const cacheResult = await redisClient.getAsync(category)
 
     if (cacheResult) {
       return response
@@ -38,9 +38,9 @@ warehouseRouter.get('/products/:category', async (request, response) => {
 
   }
 
-  result = await fetchProducts(category)
+  const result = await fetchProducts(category)
 
-  if (result.products === null) {
+  if (result.data === null) {
 
     return response
       .status(500)
@@ -48,36 +48,64 @@ warehouseRouter.get('/products/:category', async (request, response) => {
 
   }
 
-  products = result.products
+  const products = result.data
+  
+  let manufacturers = getManufacturers(products)  
 
-  // get all manufacturers from the list of products and combine data
+  let inventory = []  
+  console.log("Fetching inventories from manufacturers", manufacturers)
+  // repeat until all data is fetched
+  while (manufacturers.length > 0) {
 
-  manufacturers = getManufacturers(products)
-  manufacturerRequests = createRequests(manufacturers)
+    let res = null
+    try {
+      res = await fetchInventories(manufacturers)
+    } catch (e) {
+      return response.status(500).send(e).end()
+    }
 
-  try {
-
-    let results = await axios.all(manufacturerRequests)
-    dataArrays = results.map(item => item.data.response)
-
-    createResult(buildMapOfAvailability(concatArrays(dataArrays)), products)
-
-    await redisClient.setAsync(category, JSON.stringify(products), 'EX', config.EXPIRATION)
-
-    response
-      .status(200)
-      .json(result)
-
-  } catch (e) {
-
-    response
-      .status(500)
-      .send('Product inventories not found').end()
+    inventory = flattenArrays([inventory, res.data])
+    manufacturers = res.failed
 
   }
 
+  createResult(buildInventoryMap(inventory), products)
+  await redisClient.setAsync(category, JSON.stringify(products), 'EX', config.EXPIRATION)
+
+  console.log("Data fetched and cached")
+
+  return response
+    .status(200)
+    .json(products)
+
 })
 
+const fetchInventories = async (manufacturers) => {
+
+  const manufacturerRequests = createRequests(manufacturers)
+
+  try {
+
+    const responses = (await axios.all(manufacturerRequests)).map(result => result.data.response)
+
+    zipped = zip(manufacturers, responses)
+
+    inventoryArrays = zipped.filter(item => typeof(item[1]) === 'object').map(item => item[1])
+    failed = zipped.filter(item => typeof(item[1]) === 'string').map(item => item[0])
+
+    if (failed.length != 0) {
+      console.log("Failed to get inventory from manufacturers", failed, "retrying....")
+    }
+
+    return { 'message': 'ok', 'data': flattenArrays(inventoryArrays), 'failed': failed }
+
+  } catch (e) {
+
+    throw e
+
+  }
+
+}
 
 const fetchProducts = async (category) => {
 
@@ -87,11 +115,11 @@ const fetchProducts = async (category) => {
     let result = await createAxiosRequest(productUrl)
     products = result.data
 
-    return { 'message': 'ok', 'products': products }
+    return { 'message': 'ok', 'data': products }
 
   } catch (e) {
 
-    return { 'message': 'Server error', 'products': null }
+    return { 'message': 'Server error', 'data': null }
 
   }
 
@@ -100,11 +128,11 @@ const fetchProducts = async (category) => {
 const getManufacturers = (products) => {
   manufactures = new Set()
   products.forEach(product => manufactures.add(product.manufacturer));
-  return manufactures
+  return [...manufactures]
 }
 
-const createRequests = (manufacturers) => {  
-  axiosRequests = [...manufacturers].map(manufacturer => createAxiosRequest(config.API_BASE_URL + config.AVAILABILITY_PATH + manufacturer))
+const createRequests = (manufacturers) => {
+  axiosRequests = manufacturers.map(manufacturer => createAxiosRequest(config.API_BASE_URL + config.AVAILABILITY_PATH + manufacturer))
   return axiosRequests
 }
 
@@ -113,30 +141,22 @@ createAxiosRequest = (url) => axios(
     url: url,
     method: 'GET',
     headers: {
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/json'      
     }
   })
 
 
-const concatArrays = (arrays) => {
-
-  const reducer = (accumulator, currentValue) => accumulator.concat(currentValue);
-  return arrays.reduce(reducer, [])
-
+/**
+ * Updates the array of products in place (in order to avoid making a deep copy)
+ */
+const createResult = (inventoryMap, products) => {
+  products.forEach(product => product.availability = inventoryMap.getOrElse(product.id, "NO_INFO"))
 }
 
 /**
- * Updates the array of products in place
+ * Build a map of (product id -> availability) 
  */
-const createResult = (mapOfAvailability, products) => {  
-  products.forEach(product => product.availability = mapOfAvailability.getOrElse(product.id, "NO_INFO"))  
-}
-
-/**
- * Build a map of (product key, availability) 
- * from availabilities data.
- */
-const buildMapOfAvailability = (array) => {
+const buildInventoryMap = (array) => {
 
   const map = new Map()
 
@@ -164,6 +184,7 @@ const parseAvailability = (xmlString) => {
 
   return res
 }
+
 
 module.exports = warehouseRouter
 
