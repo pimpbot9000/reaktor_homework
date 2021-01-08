@@ -1,0 +1,26 @@
+version: "3.5"
+
+services:
+
+  backend:
+    build: ./service/.
+    container_name: warehouse
+    links:  # figure out what this is!!
+    - redis
+    ports:
+      - 4000:3000
+    environment:
+      - PORT=3000
+      - REDIS_URL=redis://cache
+  
+  redis:
+    image: redis
+    container_name: cache
+    expose:
+      - 6379
+
+  the_invalidator: # I'm here to invalidate caches... and to chew bubble gum. And I'm all out of bubble gum.  
+    build: ./invalidator/.
+    container_name: the_invalidator
+    environment:
+      - API_URL=http://warehouse:3000/warehouse/products
