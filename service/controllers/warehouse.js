@@ -53,7 +53,8 @@ warehouseRouter.get('/products/:category', async (request, response) => {
   let manufacturers = getManufacturers(products)  
 
   let inventory = []  
-  console.log("Fetching inventories from manufacturers", manufacturers)
+  console.log(`Fetching inventories from manufacturers (product category=${category}):`, manufacturers)
+
   // repeat until all data is fetched
   while (manufacturers.length > 0) {
 
@@ -100,9 +101,7 @@ const fetchInventories = async (manufacturers) => {
     return { 'message': 'ok', 'data': flattenArrays(inventoryArrays), 'failed': failed }
 
   } catch (e) {
-
     throw e
-
   }
 
 }
