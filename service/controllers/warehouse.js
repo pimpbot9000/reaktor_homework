@@ -1,11 +1,11 @@
 const warehouseRouter = require('express').Router()
-const redisClient = require('../redis/redis-client');
+const redisClient = require('../redis/redis-client')
 const axios = require('axios')
 const config = require('../utils/config')
 const xmlParser = require('xml2js').parseString
 const { zip, flattenArrays } = require('../utils/helpers')
 
-const helpString = "Your options are: /gloves, /facemasks and /beanies"
+const helpString = 'Your options are: /gloves, /facemasks and /beanies'
 
 warehouseRouter.get('/products', (_, response) => {
   return response.status(402).send(helpString).end()
@@ -14,10 +14,16 @@ warehouseRouter.get('/products', (_, response) => {
 warehouseRouter.get('/products/:category', async (request, response) => {
 
   const category = request.params.category
-  let invalidateCache = false
 
-  if (request.query.invalidate_cache === "true") {
+  let invalidateCache = false
+  let invalidateInventoryCache = false
+
+  if (request.query.invalidate_cache === 'true') {
     invalidateCache = true
+  }
+
+  if (request.query.invalidate_inventory_cache === 'true') {
+    invalidateInventoryCache = true
   }
 
   if (!config.CATEGORIES.includes(category)) {
@@ -38,7 +44,7 @@ warehouseRouter.get('/products/:category', async (request, response) => {
 
   }
 
-  const result = await fetchData(category)
+  const result = await fetchData(category, invalidateInventoryCache)
 
   if (!result.data) {
     return response
@@ -49,7 +55,7 @@ warehouseRouter.get('/products/:category', async (request, response) => {
 
   await redisClient.setAsync(category, JSON.stringify(result.data), 'EX', config.EXPIRATION)
 
-  console.log("Data fetched and cached")
+  console.log('Data fetched and cached')
 
   return response
     .status(200)
@@ -57,7 +63,7 @@ warehouseRouter.get('/products/:category', async (request, response) => {
 
 })
 
-const fetchData = async (category) => {
+const fetchData = async (category, invalidateInventoryCache) => {
 
   const result = await fetchProducts(category)
 
@@ -68,11 +74,15 @@ const fetchData = async (category) => {
   const products = result.data
 
   let manufacturers = getManufacturers(products)
-
-
   let inventory = []
 
-  // loop until data is received from all manufacturers
+  if (!invalidateInventoryCache) {
+    const [cached_inventories, manufacturers_not_cached] = await getCachedInventories(manufacturers)
+    manufacturers = manufacturers_not_cached
+    inventory = flattenArrays(cached_inventories)
+  }
+
+  // loop until data is received from all manufacturers (which were not cached)
   while (manufacturers.length > 0) {
 
     let res = null
@@ -93,31 +103,54 @@ const fetchData = async (category) => {
 
 }
 
-
-
 const fetchInventories = async (manufacturers) => {
 
   const manufacturerRequests = createRequests(manufacturers)
 
-  try {
 
-    const responses = (await axios.all(manufacturerRequests)).map(result => result.data.response)
 
-    zipped = zip(manufacturers, responses)
+  const responses = (await axios.all(manufacturerRequests)).map(result => result.data.response)
 
-    inventoryArrays = zipped.filter(item => typeof (item[1]) === 'object').map(item => item[1])
-    failed = zipped.filter(item => typeof (item[1]) === 'string').map(item => item[0]) // error happened
+  const zipped = zip(manufacturers, responses)
 
-    if (failed.length != 0) {
-      console.log('Failed to get inventory from manufacturers', failed, 'retrying....')
-    }
+  const manufacturersAndInventories = zipped.filter(item => typeof (item[1]) === 'object') // succesfull
+  await cacheInventories(manufacturersAndInventories)
+  const inventories = manufacturersAndInventories.map(item => item[1])
 
-    return { 'data': flattenArrays(inventoryArrays), 'failed': failed }
+  const failed = zipped.filter(item => typeof (item[1]) === 'string').map(item => item[0]) // error happened
 
-  } catch (e) {
-    throw e
+  if (failed.length != 0) {
+    console.log('Failed to get inventory from manufacturers', failed, 'retrying....')
   }
 
+  return { 'data': flattenArrays(inventories), 'failed': failed }
+
+
+
+}
+
+const cacheInventories = async (manufacturersAndInventories) => {
+
+  for (const [manufacturer, inventory] of manufacturersAndInventories) {
+    await redisClient.setAsync(manufacturer, JSON.stringify(inventory), 'EX', config.EXPIRATION)
+  }
+
+}
+
+const getCachedInventories = async (manufacturers) => {
+
+  const inventories = []
+  const manufacturers_not_cached = []
+
+  for (let m of manufacturers) {
+    const inventory = await redisClient.getAsync(m)
+    if (inventory) {
+      inventories.push(JSON.parse(inventory))
+    } else {
+      manufacturers_not_cached.push(m)
+    }
+  }
+  return [inventories, manufacturers_not_cached]
 }
 
 const fetchProducts = async (category) => {
@@ -126,9 +159,9 @@ const fetchProducts = async (category) => {
 
     const productUrl = config.API_BASE_URL + config.PRODUCTS_PATH + category
     let result = await createAxiosRequest(productUrl)
-    products = result.data
+    
 
-    return { 'message': 'ok', 'data': products }
+    return { 'message': 'ok', 'data': result.data }
 
   } catch (e) {
 
@@ -139,17 +172,17 @@ const fetchProducts = async (category) => {
 }
 
 const getManufacturers = (products) => {
-  manufactures = new Set()
-  products.forEach(product => manufactures.add(product.manufacturer));
+  const manufactures = new Set()
+  products.forEach(product => manufactures.add(product.manufacturer))
   return [...manufactures]
 }
 
 const createRequests = (manufacturers) => {
-  axiosRequests = manufacturers.map(manufacturer => createAxiosRequest(config.API_BASE_URL + config.AVAILABILITY_PATH + manufacturer))
+  const axiosRequests = manufacturers.map(manufacturer => createAxiosRequest(config.API_BASE_URL + config.AVAILABILITY_PATH + manufacturer))
   return axiosRequests
 }
 
-createAxiosRequest = (url) => axios(
+const createAxiosRequest = (url) => axios(
   {
     url: url,
     method: 'GET',
@@ -176,7 +209,7 @@ const buildInventoryMap = (array) => {
   array.forEach(item => {
 
     try {
-      key = item.id.toLowerCase()
+      const key = item.id.toLowerCase()
       map.set(key, parseAvailability(item.DATAPAYLOAD))
     } catch (e) {
       // do nothing, _should_ not happend
@@ -189,10 +222,10 @@ const buildInventoryMap = (array) => {
 
 const parseAvailability = (xmlString) => {
 
-  res = null
+  let res = null
   xmlParser(xmlString, (err, result) => {
-    if (err === null) res = result.AVAILABILITY.INSTOCKVALUE[0];
-  });
+    if (err === null) res = result.AVAILABILITY.INSTOCKVALUE[0]
+  })
 
   return res
 }
