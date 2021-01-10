@@ -3,7 +3,7 @@ const redisClient = require('../redis/redis-client');
 const axios = require('axios')
 const config = require('../utils/config')
 const xmlParser = require('xml2js').parseString
-const {zip, flattenArrays} = require('../utils/helpers')
+const { zip, flattenArrays } = require('../utils/helpers')
 
 const helpString = "Your options are: /gloves, /facemasks and /beanies"
 
@@ -38,48 +38,62 @@ warehouseRouter.get('/products/:category', async (request, response) => {
 
   }
 
+  const result = await fetchData(category)
+
+  if (!result.data) {
+    return response
+      .status(500)
+      .send(result.message)
+      .end()
+  }
+
+  await redisClient.setAsync(category, JSON.stringify(result.data), 'EX', config.EXPIRATION)
+
+  console.log("Data fetched and cached")
+
+  return response
+    .status(200)
+    .json(result.data)
+
+})
+
+const fetchData = async (category) => {
+
   const result = await fetchProducts(category)
 
   if (result.data === null) {
-
-    return response
-      .status(500)
-      .send(result.message).end()
-
+    return result
   }
 
   const products = result.data
-  
-  let manufacturers = getManufacturers(products)  
 
-  let inventory = []  
-  console.log(`Fetching inventories from manufacturers (product category=${category}):`, manufacturers)
+  let manufacturers = getManufacturers(products)
 
-  // repeat until all data is fetched
+
+  let inventory = []
+
+  // loop until data is received from all manufacturers
   while (manufacturers.length > 0) {
 
     let res = null
     try {
       res = await fetchInventories(manufacturers)
     } catch (e) {
-      return response.status(500).send(e).end()
+      return { 'message': 'Server error', 'data': null }
     }
 
     inventory = flattenArrays([inventory, res.data])
     manufacturers = res.failed
-
   }
 
+  // populate products with inventory data
   createResult(buildInventoryMap(inventory), products)
-  await redisClient.setAsync(category, JSON.stringify(products), 'EX', config.EXPIRATION)
 
-  console.log("Data fetched and cached")
+  return { 'message': 'ok', 'data': products }
 
-  return response
-    .status(200)
-    .json(products)
+}
 
-})
+
 
 const fetchInventories = async (manufacturers) => {
 
@@ -91,14 +105,14 @@ const fetchInventories = async (manufacturers) => {
 
     zipped = zip(manufacturers, responses)
 
-    inventoryArrays = zipped.filter(item => typeof(item[1]) === 'object').map(item => item[1])
-    failed = zipped.filter(item => typeof(item[1]) === 'string').map(item => item[0])
+    inventoryArrays = zipped.filter(item => typeof (item[1]) === 'object').map(item => item[1])
+    failed = zipped.filter(item => typeof (item[1]) === 'string').map(item => item[0]) // error happened
 
     if (failed.length != 0) {
-      console.log("Failed to get inventory from manufacturers", failed, "retrying....")
+      console.log('Failed to get inventory from manufacturers', failed, 'retrying....')
     }
 
-    return { 'message': 'ok', 'data': flattenArrays(inventoryArrays), 'failed': failed }
+    return { 'data': flattenArrays(inventoryArrays), 'failed': failed }
 
   } catch (e) {
     throw e
@@ -140,16 +154,16 @@ createAxiosRequest = (url) => axios(
     url: url,
     method: 'GET',
     headers: {
-      'Content-Type': 'application/json'      
+      'Content-Type': 'application/json'
     }
   })
 
 
 /**
- * Updates the array of products in place (in order to avoid making a deep copy)
+ * Updates the array of products in place
  */
 const createResult = (inventoryMap, products) => {
-  products.forEach(product => product.availability = inventoryMap.getOrElse(product.id, "NO_INFO"))
+  products.forEach(product => product.availability = inventoryMap.getOrElse(product.id, 'NO_INFO'))
 }
 
 /**
@@ -165,7 +179,7 @@ const buildInventoryMap = (array) => {
       key = item.id.toLowerCase()
       map.set(key, parseAvailability(item.DATAPAYLOAD))
     } catch (e) {
-      // do nothing
+      // do nothing, _should_ not happend
     }
 
   })
@@ -176,14 +190,12 @@ const buildInventoryMap = (array) => {
 const parseAvailability = (xmlString) => {
 
   res = null
-
   xmlParser(xmlString, (err, result) => {
     if (err === null) res = result.AVAILABILITY.INSTOCKVALUE[0];
   });
 
   return res
 }
-
 
 module.exports = warehouseRouter
 
